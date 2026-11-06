@@ -236,7 +236,7 @@ static OSStatus HotKeyPressed(EventHandlerCallRef next, EventRef event, void *co
     NSMenu *menu = [NSMenu new];
     menu.autoenablesItems = NO;
 
-    self.toggleItem = [self item:@"切换下一个设备 · ⌃⌥⇧M" action:@selector(toggleInput:) menu:menu];
+    self.toggleItem = [self item:@"切换下一个设备 · ⌃⌥⌘M" action:@selector(toggleInput:) menu:menu];
     [menu addItem:NSMenuItem.separatorItem];
     self.toWinItem = [self item:@"强制切到 Windows (DP)" action:@selector(switchToWindows:) menu:menu];
     self.toMacItem = [self item:@"强制切到 Mac (HDMI 2)" action:@selector(switchToMac:) menu:menu];
@@ -264,7 +264,7 @@ static OSStatus HotKeyPressed(EventHandlerCallRef next, EventRef event, void *co
     OSStatus status = InstallApplicationEventHandler(HotKeyPressed, 1, &event, (__bridge void *)self, &_eventHandler);
     if (status == noErr) {
         EventHotKeyID key = {'ScSw', 1};
-        RegisterEventHotKey(kVK_ANSI_M, controlKey | optionKey | shiftKey,
+        RegisterEventHotKey(kVK_ANSI_M, controlKey | optionKey | cmdKey,
                             key, GetApplicationEventTarget(), 0, &_hotKey);
     }
 }

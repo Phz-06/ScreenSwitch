@@ -8,7 +8,7 @@
 
 两端使用同一组按键习惯，按键由当前操作的电脑接收：
 
-- **Mac 端**：`Control + Option + Shift + M` (`⌃⌥⇧M`)
+- **Mac 端**：`Control + Option + Command + M` (`⌃⌥⌘M`)
 - **Windows 端**：`Ctrl + Alt + Shift + M`
 
 ---

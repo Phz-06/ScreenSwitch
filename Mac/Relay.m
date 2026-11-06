@@ -10,6 +10,13 @@
 
 static const uint16_t RelayPort = 43862;
 static const size_t TagLength = 32;
+static NSString *lastDiscoveredCode = nil;
+
+NSString *RelayGetUpdatedCode(void) {
+    NSString *res = lastDiscoveredCode;
+    lastDiscoveredCode = nil;
+    return res;
+}
 
 static NSData *ParseCode(NSString *code, struct sockaddr_in *address) {
     NSArray<NSString *> *parts = [code componentsSeparatedByString:@":"];
@@ -75,18 +82,17 @@ static BOOL Exchange(int socketFD, const struct sockaddr_in *address, NSData *ke
     if (connected != 0) {
         int socketError = 0;
         socklen_t size = sizeof(socketError);
-        if (errno != EINPROGRESS || !WaitForSocket(socketFD, POLLOUT, MonotonicTime() + 3) ||
+        if (errno != EINPROGRESS || !WaitForSocket(socketFD, POLLOUT, MonotonicTime() + 2) ||
             getsockopt(socketFD, SOL_SOCKET, SO_ERROR, &socketError, &size) != 0 || socketError) {
             *error = @"连不上 Windows。请确认两台电脑在同一局域网、Windows 已唤醒且中转已开启，并检查局域网和防火墙权限。";
             return NO;
         }
     }
 
-    // Each connection gets a fresh challenge. The shared key is never sent.
     uint8_t challenge[34] = {0};
     uint8_t request[33] = {command};
     uint8_t reply[33];
-    double deadline = MonotonicTime() + 6;
+    double deadline = MonotonicTime() + 4;
     if (!Transfer(socketFD, challenge, 32, NO, deadline)) {
         *error = @"已连接 Windows，但没收到中转握手。";
         return NO;
@@ -112,7 +118,40 @@ static BOOL Exchange(int socketFD, const struct sockaddr_in *address, NSData *ke
     return YES;
 }
 
-NSString *RelayRequest(NSString *code, BOOL switchInput, NSString **error) {
+// 快速子网发现自愈：如果 Windows 的 IP 变了，自动扫描同子网寻找匹配该 key 的设备
+static BOOL AutoDiscoverWindows(const struct sockaddr_in *origAddr, NSData *key,
+                                uint8_t command, uint8_t *status, NSString **newCode) {
+    uint32_t ip = ntohl(origAddr->sin_addr.s_addr);
+    uint32_t subnet = ip & 0xFFFFFF00; // 假设 /24 子网
+    uint32_t origHost = ip & 0xFF;
+
+    for (uint32_t host = 1; host < 255; host++) {
+        if (host == origHost) continue; // 原 IP 刚试过失败了，跳过
+        struct sockaddr_in testAddr = {
+            .sin_len = sizeof(testAddr),
+            .sin_family = AF_INET,
+            .sin_port = htons(RelayPort),
+            .sin_addr = {.s_addr = htonl(subnet | host)}
+        };
+
+        int fd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (fd < 0) continue;
+
+        NSString *dummyErr = nil;
+        if (Exchange(fd, &testAddr, key, command, status, &dummyErr)) {
+            close(fd);
+            char ipStr[INET_ADDRSTRLEN];
+            inet_ntop(AF_INET, &testAddr.sin_addr, ipStr, sizeof(ipStr));
+            NSString *b64Key = [key base64EncodedStringWithOptions:0];
+            *newCode = [NSString stringWithFormat:@"SS1:%s:%@", ipStr, b64Key];
+            return YES;
+        }
+        close(fd);
+    }
+    return NO;
+}
+
+NSString *RelayRequestCommand(NSString *code, uint8_t command, NSString **error) {
     struct sockaddr_in address;
     NSData *key = ParseCode(code, &address);
     if (!key) {
@@ -125,17 +164,39 @@ NSString *RelayRequest(NSString *code, BOOL switchInput, NSString **error) {
         *error = @"无法创建局域网连接。";
         return nil;
     }
+
     uint8_t status = 0;
-    BOOL received = Exchange(socketFD, &address, key, switchInput ? 1 : 0, &status, error);
+    BOOL received = Exchange(socketFD, &address, key, command, &status, error);
     close(socketFD);
+
+    // 如果首选 IP 连接失败，自动在同网段自愈寻找 Windows 的新 IP
+    if (!received) {
+        NSString *newCode = nil;
+        uint8_t fallbackStatus = 0;
+        if (AutoDiscoverWindows(&address, key, command, &fallbackStatus, &newCode)) {
+            lastDiscoveredCode = newCode;
+            status = fallbackStatus;
+            received = YES;
+            *error = nil;
+        }
+    }
+
     if (!received) return nil;
 
     switch (status) {
-        case 0: return switchInput ? @"Windows 已发出切到 DP 的指令。" : @"配对成功，Windows 中转在线。";
-        case 1: *error = @"Windows 当前识别不到 HKC MG24Q。显示器可能在使用 HDMI 2 时断开了未选中的 DP。"; break;
-        case 2: *error = @"Windows 找到了显示器，但 DP 上的切换指令失败。请检查 DDC/CI 和显示器的输入设置。"; break;
+        case 0:
+            if (command == 0) return @"配对成功，Windows 中转在线。";
+            if (command == 1) return @"Windows 已发出切到 DP 的指令。";
+            if (command == 2) return @"Windows 已发出切到 Mac (HDMI 2) 的指令。";
+            return @"已切换输入源。";
+        case 1: *error = @"Windows 当前识别不到 HKC MG24Q。显示器可能在断开 DP。"; break;
+        case 2: *error = @"Windows 找到了显示器，但切换指令失败。请检查显示器 DDC/CI 设置。"; break;
         case 3: *error = @"配对码不匹配，请从 Windows 重新复制。"; break;
         default: *error = @"Windows 中转返回了未知结果。";
     }
     return nil;
+}
+
+NSString *RelayRequest(NSString *code, BOOL switchInput, NSString **error) {
+    return RelayRequestCommand(code, switchInput ? 1 : 0, error);
 }

@@ -23,6 +23,7 @@ static class MonitorInput
     public const uint MacInput = 0x12; // HDMI 2
     public const uint WindowsInput = 0x0f; // DisplayPort
     static readonly object Gate = new object();
+    static uint lastSwitchedTarget = MacInput;
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     struct PhysicalMonitor
@@ -95,7 +96,72 @@ static class MonitorInput
 
     public static string Run(uint target)
     {
-        lock (Gate) return Send(target);
+        lock (Gate)
+        {
+            if (target != 0) lastSwitchedTarget = target;
+            return Send(target);
+        }
+    }
+
+    public static string Toggle()
+    {
+        lock (Gate)
+        {
+            uint current = 0;
+            try { current = ReadCurrent(); } catch { }
+
+            uint target;
+            if (current == WindowsInput)
+                target = MacInput;
+            else if (current == MacInput)
+                target = WindowsInput;
+            else
+                target = (lastSwitchedTarget == WindowsInput) ? MacInput : WindowsInput;
+
+            lastSwitchedTarget = target;
+            return Send(target);
+        }
+    }
+
+    static uint ReadCurrent()
+    {
+        var logical = new List<IntPtr>();
+        MonitorCallback collect = delegate(IntPtr monitor, IntPtr dc, IntPtr rect, IntPtr data)
+        {
+            logical.Add(monitor);
+            return true;
+        };
+        if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, collect, IntPtr.Zero))
+            return 0;
+
+        var opened = new List<PhysicalMonitor[]>();
+        try
+        {
+            foreach (IntPtr monitor in logical)
+            {
+                bool namedDevice = HasModelDevice(monitor);
+                uint count;
+                if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, out count) || count == 0) continue;
+                var physical = new PhysicalMonitor[count];
+                if (!GetPhysicalMonitorsFromHMONITOR(monitor, count, physical)) continue;
+                opened.Add(physical);
+                foreach (PhysicalMonitor item in physical)
+                {
+                    if (IsModel(item.Description) || (namedDevice && count == 1))
+                    {
+                        uint current;
+                        if (GetVCPFeatureAndVCPFeatureReply(item.Handle, InputSelect, IntPtr.Zero, out current, IntPtr.Zero))
+                            return current;
+                    }
+                }
+            }
+            return 0;
+        }
+        finally
+        {
+            foreach (PhysicalMonitor[] physical in opened)
+                DestroyPhysicalMonitors((uint)physical.Length, physical);
+        }
     }
 
     static string Send(uint target)
@@ -171,7 +237,7 @@ sealed class TrayApp : Form
     const uint CtrlAltShiftNoRepeat = 0x4007;
     readonly NotifyIcon tray;
     readonly ContextMenuStrip menu;
-    readonly ToolStripItem switchItem, readItem, stopRelayItem;
+    readonly ToolStripItem switchItem, readItem;
     const string SettingsPath = @"Software\HKC-MG24Q-ScreenSwitch";
     Relay relay;
     IPAddress relayAddress;
@@ -182,77 +248,68 @@ sealed class TrayApp : Form
     {
         ShowInTaskbar = false;
         menu = new ContextMenuStrip();
-        switchItem = menu.Items.Add("切回 Mac（HDMI 2）", null, delegate { StartOperation(false); });
+        switchItem = menu.Items.Add("切换下一个设备", null, delegate { StartOperation(false); });
         readItem = menu.Items.Add("读取当前输入源", null, delegate { StartOperation(true); });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("扩展坞模式：启用或复制配对码…", null, delegate { ConfigureRelay(); });
-        stopRelayItem = menu.Items.Add("关闭扩展坞中转", null, delegate { StopRelay(); });
-        stopRelayItem.Enabled = false;
+        menu.Items.Add("扩展坞模式：查看或复制配对码…", null, delegate { ConfigureRelay(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, delegate { Close(); });
         tray = new NotifyIcon { Text = "换屏 · HKC MG24Q", Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
         tray.MouseClick += delegate(object sender, MouseEventArgs e)
         {
             if (e.Button == MouseButtons.Left)
-                tray.ShowBalloonTip(3000, "换屏 · HKC MG24Q", "运行中：按 Ctrl+Alt+Shift+M 切换输入源，右键打开设置菜单。", ToolTipIcon.Info);
+                tray.ShowBalloonTip(3000, "换屏 · HKC MG24Q", "运行中：按 Ctrl+Alt+Shift+M 切换设备，右键打开设置菜单。", ToolTipIcon.Info);
         };
     }
 
-    public void RestoreRelay()
+    public void RestoreOrAutoStartRelay()
     {
         try
         {
-            using (var settings = Registry.CurrentUser.OpenSubKey(SettingsPath))
+            using (var settings = Registry.CurrentUser.CreateSubKey(SettingsPath))
             {
-                if (settings == null) return;
                 relayKey = settings.GetValue("RelayKey") as byte[];
+                if (relayKey == null || relayKey.Length != 32)
+                {
+                    relayKey = Relay.NewKey();
+                    settings.SetValue("RelayKey", relayKey, RegistryValueKind.Binary);
+                }
+
                 IPAddress address;
-                if (relayKey != null && relayKey.Length == 32 &&
-                    IPAddress.TryParse(settings.GetValue("RelayAddress") as string, out address) &&
-                    Relay.IsPrivateIPv4(address))
-                    StartRelay(address);
+                string savedAddr = settings.GetValue("RelayAddress") as string;
+                if (!string.IsNullOrEmpty(savedAddr) && IPAddress.TryParse(savedAddr, out address) && Relay.IsPrivateIPv4(address))
+                    relayAddress = address;
+                else
+                    relayAddress = Relay.GetPreferredPrivateIP();
+
+                settings.SetValue("RelayAddress", relayAddress.ToString());
             }
+
+            StartRelay(relayAddress);
         }
-        catch (SocketException)
+        catch (Exception error)
         {
-            tray.ShowBalloonTip(5000, "换屏", "中转地址已不可用，请从托盘重新配对。", ToolTipIcon.Warning);
-        }
-        catch (SecurityException)
-        {
-            tray.ShowBalloonTip(5000, "换屏", "无法读取已保存的中转设置。", ToolTipIcon.Warning);
+            tray.ShowBalloonTip(4000, "换屏", "自动开启中转失败：" + error.Message, ToolTipIcon.Warning);
         }
     }
 
     void StartRelay(IPAddress address)
     {
-        if (relay != null && address.Equals(relayAddress)) return;
-        var next = new Relay(address, relayKey, delegate
+        if (relay != null) relay.Dispose();
+        relayAddress = address;
+        relay = new Relay(IPAddress.Any, relayKey, delegate(byte command)
         {
-            try { MonitorInput.Run(MonitorInput.WindowsInput); return 0; }
+            try
+            {
+                if (command == 1) { MonitorInput.Run(MonitorInput.WindowsInput); return 0; }
+                if (command == 2) { MonitorInput.Run(MonitorInput.MacInput); return 0; }
+                if (command == 3) { MonitorInput.Toggle(); return 0; }
+                return 0; // command 0 is probe
+            }
             catch (MonitorUnavailableException) { return 1; }
             catch (Win32Exception) { return 2; }
             catch (InvalidOperationException) { return 2; }
         });
-        if (relay != null) relay.Dispose();
-        relay = next;
-        relayAddress = address;
-        stopRelayItem.Enabled = true;
-    }
-
-    void StopRelay()
-    {
-        if (relay != null) relay.Dispose();
-        relay = null;
-        stopRelayItem.Enabled = false;
-        try
-        {
-            using (var settings = Registry.CurrentUser.CreateSubKey(SettingsPath))
-                settings.DeleteValue("RelayAddress", false);
-        }
-        catch (Exception error)
-        {
-            MessageBox.Show("本次中转已停止，但无法保存设置。\n" + error.Message, "换屏");
-        }
     }
 
     void ConfigureRelay()
@@ -273,57 +330,76 @@ sealed class TrayApp : Form
             using (var layout = new FlowLayoutPanel())
             using (var addressBox = new ComboBox())
             using (var copy = new Button())
+            using (var rekey = new Button())
             using (var cancel = new Button())
             {
                 dialog.Text = "换屏 · 配对 Mac";
-                dialog.ClientSize = new Size(360, 132);
+                dialog.ClientSize = new Size(380, 140);
                 dialog.FormBorderStyle = FormBorderStyle.FixedDialog;
                 dialog.MaximizeBox = dialog.MinimizeBox = false;
                 dialog.StartPosition = FormStartPosition.CenterScreen;
                 layout.Dock = DockStyle.Fill;
                 layout.Padding = new Padding(10);
-                var label = new Label { Text = "选择和 Mac 在同一局域网的 Windows 地址。", AutoSize = true };
+                var label = new Label { Text = "中转已默认自动开启。请选择并复制配对码：", AutoSize = true };
                 layout.Controls.Add(label);
                 layout.SetFlowBreak(label, true);
-                addressBox.Width = 325;
+
+                addressBox.Width = 345;
                 addressBox.DropDownStyle = ComboBoxStyle.DropDownList;
                 foreach (IPAddress address in addresses) addressBox.Items.Add(address);
                 int current = Array.IndexOf(addresses, relayAddress);
                 addressBox.SelectedIndex = Math.Max(0, current);
                 layout.Controls.Add(addressBox);
                 layout.SetFlowBreak(addressBox, true);
-                copy.Text = "开启并复制配对码";
+
+                copy.Text = "复制配对码";
                 copy.AutoSize = true;
                 copy.DialogResult = DialogResult.OK;
-                cancel.Text = "取消";
+
+                rekey.Text = "重置密钥";
+                rekey.AutoSize = true;
+
+                cancel.Text = "关闭";
                 cancel.DialogResult = DialogResult.Cancel;
+
+                rekey.Click += delegate
+                {
+                    if (MessageBox.Show("重置密钥后，Mac 端需要重新粘贴配对码。确认重置？", "换屏", MessageBoxButtons.YesNo) == DialogResult.Yes)
+                    {
+                        relayKey = Relay.NewKey();
+                        using (var settings = Registry.CurrentUser.CreateSubKey(SettingsPath))
+                            settings.SetValue("RelayKey", relayKey, RegistryValueKind.Binary);
+                        MessageBox.Show("密钥已重置，请点击「复制配对码」并在 Mac 重新配对。", "换屏");
+                    }
+                };
+
                 layout.Controls.Add(copy);
+                layout.Controls.Add(rekey);
                 layout.Controls.Add(cancel);
                 dialog.Controls.Add(layout);
                 dialog.AcceptButton = copy;
                 dialog.CancelButton = cancel;
+
                 if (dialog.ShowDialog() != DialogResult.OK) return;
 
                 var selected = (IPAddress)addressBox.SelectedItem;
-                if (relayKey == null || relayKey.Length != 32) relayKey = Relay.NewKey();
-                StartRelay(selected);
+                relayAddress = selected;
                 using (var settings = Registry.CurrentUser.CreateSubKey(SettingsPath))
-                {
-                    settings.SetValue("RelayKey", relayKey, RegistryValueKind.Binary);
                     settings.SetValue("RelayAddress", selected.ToString());
-                }
+
                 Clipboard.SetText("SS1:" + selected + ":" + Convert.ToBase64String(relayKey));
-                MessageBox.Show("配对码已复制。请在 Mac 菜单栏「换屏 → 配对 Windows 中转」里粘贴。\n若防火墙询问，请仅允许私人网络。", "换屏");
+                MessageBox.Show("配对码已复制！\n中转服务在后台持续运行，每次开机均会自动连接。\n请在 Mac 菜单栏「换屏 → 配对 Windows 中转」粘贴即可。", "换屏");
             }
         }
         catch (Exception error)
         {
-            MessageBox.Show("无法完成扩展坞配对。\n" + error.Message, "换屏");
+            MessageBox.Show("无法完成配置。\n" + error.Message, "换屏");
         }
     }
+
     public void ShowStartupTip()
     {
-        tray.ShowBalloonTip(4000, "换屏 · HKC MG24Q", "已在后台启动并驻留右下角托盘。\n按 Ctrl+Alt+Shift+M 切换输入源。", ToolTipIcon.Info);
+        tray.ShowBalloonTip(4000, "换屏 · HKC MG24Q", "已在后台启动并自动开启扩展坞中转。\n按 Ctrl+Alt+Shift+M 切换设备。", ToolTipIcon.Info);
     }
 
     public void RegisterShortcut()
@@ -351,7 +427,10 @@ sealed class TrayApp : Form
         busy = true;
         switchItem.Enabled = readItem.Enabled = false;
         var worker = new BackgroundWorker();
-        worker.DoWork += delegate(object sender, DoWorkEventArgs args) { args.Result = MonitorInput.Run(read ? 0 : MonitorInput.MacInput); };
+        worker.DoWork += delegate(object sender, DoWorkEventArgs args)
+        {
+            args.Result = read ? MonitorInput.Run(0) : MonitorInput.Toggle();
+        };
         worker.RunWorkerCompleted += delegate(object sender, RunWorkerCompletedEventArgs args)
         {
             worker.Dispose();
@@ -400,7 +479,7 @@ sealed class TrayApp : Form
             using (var app = new TrayApp())
             {
                 app.RegisterShortcut();
-                app.RestoreRelay();
+                app.RestoreOrAutoStartRelay();
                 app.ShowStartupTip();
                 Application.Run(new ApplicationContext(app));
             }

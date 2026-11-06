@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key><string>ScreenSwitch</string>
+    <key>CFBundleIdentifier</key><string>local.hkcmg24q.screenswitch</string>
+    <key>CFBundleName</key><string>ScreenSwitch</string>
+    <key>CFBundleDisplayName</key><string>换屏</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleVersion</key><string>3</string>
+    <key>CFBundleShortVersionString</key><string>1.2</string>
+    <key>NSLocalNetworkUsageDescription</key><string>联系同一局域网的 Windows 电脑，转发显示器输入源切换指令。</string>
+    <key>LSUIElement</key><true/>
+</dict>
+</plist>

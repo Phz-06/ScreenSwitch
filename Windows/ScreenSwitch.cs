@@ -110,7 +110,7 @@ static class MonitorInput
             throw new Win32Exception();
 
         var opened = new List<PhysicalMonitor[]>();
-        var matches = new HashSet<IntPtr>();
+        var matches = new List<IntPtr>();
         try
         {
             foreach (IntPtr monitor in logical)
@@ -130,7 +130,7 @@ static class MonitorInput
                 }
                 opened.Add(physical);
                 foreach (PhysicalMonitor item in physical)
-                    if (item.Handle != IntPtr.Zero && (IsModel(item.Description) || (namedDevice && count == 1)))
+                    if (IsModel(item.Description) || (namedDevice && count == 1))
                         matches.Add(item.Handle);
             }
 
@@ -191,6 +191,11 @@ sealed class TrayApp : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("退出", null, delegate { Close(); });
         tray = new NotifyIcon { Text = "换屏 · HKC MG24Q", Icon = SystemIcons.Application, ContextMenuStrip = menu, Visible = true };
+        tray.MouseClick += delegate(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Left)
+                tray.ShowBalloonTip(3000, "换屏 · HKC MG24Q", "运行中：按 Ctrl+Alt+Shift+M 切换输入源，右键打开设置菜单。", ToolTipIcon.Info);
+        };
     }
 
     public void RestoreRelay()
@@ -316,6 +321,10 @@ sealed class TrayApp : Form
             MessageBox.Show("无法完成扩展坞配对。\n" + error.Message, "换屏");
         }
     }
+    public void ShowStartupTip()
+    {
+        tray.ShowBalloonTip(4000, "换屏 · HKC MG24Q", "已在后台启动并驻留右下角托盘。\n按 Ctrl+Alt+Shift+M 切换输入源。", ToolTipIcon.Info);
+    }
 
     public void RegisterShortcut()
     {
@@ -392,6 +401,7 @@ sealed class TrayApp : Form
             {
                 app.RegisterShortcut();
                 app.RestoreRelay();
+                app.ShowStartupTip();
                 Application.Run(new ApplicationContext(app));
             }
         }
